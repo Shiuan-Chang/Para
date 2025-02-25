@@ -26,11 +26,13 @@ namespace Para
             int recordNum = 3_000_000; // 每個批次處理的數據量
             int batchNum = (totalRecords / recordNum) + 1; // 計算批次數量
 
-            ConcurrentBag<CsvRow> processedRows = new ConcurrentBag<CsvRow>(); // 儲存讀取的數據
+            // 限制最多同時 5 個 Task 寫入檔案，避免過多 I/O 操作
+            SemaphoreSlim writeSemaphore = new SemaphoreSlim(1, 1);
+
 
             Console.WriteLine($"開始並行讀取 CSV (批次數: {batchNum})");
 
-            await Parallel.ForAsync(0, batchNum, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, async (count, _) =>
+            await Parallel.ForAsync(0, batchNum, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (count, _) =>
             {
                 Stopwatch readStopwatch = Stopwatch.StartNew();
 
@@ -43,33 +45,34 @@ namespace Para
                 // 讀取 CSV
                 List<CsvRow> result = await Task.Run(() => CSVHelper.CSV.ReadCSV<CsvRow>(readFilePath, startLine, linesToRead));
 
-                // 加入 ConcurrentBag
-                foreach (CsvRow row in result)
-                {
-                    processedRows.Add(row);
-                }
-
                 readStopwatch.Stop();
                 double batchReadTime = readStopwatch.Elapsed.TotalSeconds;
                 Console.WriteLine($"執行緒 {count + 1}/{batchNum} 結束讀取，資料筆數: {result.Count}，讀取耗時: {batchReadTime:F4} 秒");
 
-                lock (typeof(Program)) // 使用lock避免競爭
+
+                Stopwatch writeStopwatch = Stopwatch.StartNew();
+                await writeSemaphore.WaitAsync(); // 限制同時寫入的 Task
+                try
                 {
-                    maxReadTime = Math.Max(maxReadTime, batchReadTime);
+                    await Task.Run(() => CSVHelper.CSV.WriteCSV<CsvRow>(outputPath, result, true));
                 }
+                finally
+                {
+                    writeSemaphore.Release();
+                }
+                writeStopwatch.Stop();
+
+                double batchWriteTime = writeStopwatch.Elapsed.TotalSeconds;
+
+                writeStopwatch.Stop();
+                maxWriteTime = writeStopwatch.Elapsed.TotalSeconds;
+
             });
 
             Console.WriteLine("所有讀取作業完成，開始寫入 CSV...");
 
-            // 計時寫入過程
-            Stopwatch writeStopwatch = Stopwatch.StartNew();
-
-            // 將 ConcurrentBag 轉為 List 並寫入
-            List<CsvRow> sortedList = processedRows.ToList();
-            await Task.Run(() => CSVHelper.CSV.WriteCSV<CsvRow>(outputPath, sortedList));
-
-            writeStopwatch.Stop();
-            maxWriteTime = writeStopwatch.Elapsed.TotalSeconds;
+           
+            
 
             totalStopwatch.Stop();
 
@@ -80,7 +83,7 @@ namespace Para
             Console.WriteLine($"總共耗時: {totalStopwatch.Elapsed.TotalSeconds:F2} 秒");
         }
 
-        static async Task Main(string[] args) // ✅ 加入 Main 方法來啟動程序
+        static async Task Main(string[] args) 
         {
             await ParallelProcessingAsync();
         }
